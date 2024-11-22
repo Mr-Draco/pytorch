@@ -15,6 +15,7 @@ from tensorboard.compat.proto.summary_pb2 import (
     HistogramProto,
     Summary,
     SummaryMetadata,
+    DataClass,
 )
 from tensorboard.compat.proto.tensor_pb2 import TensorProto
 from tensorboard.compat.proto.tensor_shape_pb2 import TensorShapeProto
@@ -646,7 +647,20 @@ def video(tag, tensor, fps=4):
     tensor = tensor.astype(np.float32)
     tensor = (tensor * scale_factor).clip(0, 255).astype(np.uint8)
     video = make_video(tensor, fps)
-    return Summary(value=[Summary.Value(tag=tag, image=video)])
+    plugin_data = SummaryMetadata.PluginData(plugin_name="videos")
+    data_class = DataClass.DATA_CLASS_BLOB_SEQUENCE
+    res = Summary(
+        value=[
+            Summary.Value(
+                tag=tag,
+                metadata=SummaryMetadata(
+                    plugin_data=plugin_data, data_class=data_class
+                ),
+                image=video,
+            )
+        ]
+    )
+    return res
 
 
 def make_video(tensor, fps):
@@ -670,14 +684,12 @@ def make_video(tensor, fps):
     # encode sequence of images into gif string
     clip = mpy.ImageSequenceClip(list(tensor), fps=fps)
 
-    filename = tempfile.NamedTemporaryFile(suffix=".gif", delete=False).name
+    filename = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
     try:  # newer version of moviepy use logger instead of progress_bar argument.
-        clip.write_gif(filename, verbose=False, logger=None)
+        clip.write_videofile(filename, verbose=False, logger=None)
     except TypeError:
-        try:  # older version of moviepy does not support progress_bar argument.
-            clip.write_gif(filename, verbose=False, progress_bar=False)
-        except TypeError:
-            clip.write_gif(filename, verbose=False)
+        print("Error writing video file.")
+        return
 
     with open(filename, "rb") as f:
         tensor_string = f.read()
