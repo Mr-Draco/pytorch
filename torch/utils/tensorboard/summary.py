@@ -641,7 +641,6 @@ def make_image(tensor, rescale=1, rois=None, labels=None):
 
 def video(tag, tensor, fps=4):
     tensor = make_np(tensor)
-    tensor = _prepare_video(tensor)
     # If user passes in uint8, then we don't need to rescale by 255
     scale_factor = _calc_scale_factor(tensor)
     tensor = tensor.astype(np.float32)
@@ -664,44 +663,108 @@ def video(tag, tensor, fps=4):
 
 
 def make_video(tensor, fps):
-    try:
-        import moviepy  # noqa: F401
-    except ImportError:
-        print("add_video needs package moviepy")
-        return
-    try:
-        from moviepy import editor as mpy
-    except ImportError:
-        print(
-            "moviepy is installed, but can't import moviepy.editor.",
-            "Some packages could be missing [imageio, requests]",
-        )
-        return
     import tempfile
 
-    _t, h, w, c = tensor.shape
+    with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_out:
+        output_path = temp_out.name
+        try:
+            if not isinstance(tensor, np.ndarray):
+                tensor = make_np(tensor)
 
-    # encode sequence of images into gif string
-    clip = mpy.ImageSequenceClip(list(tensor), fps=fps)
-
-    filename = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-    try:  # newer version of moviepy use logger instead of progress_bar argument.
-        clip.write_videofile(filename, verbose=False, logger=None)
-    except TypeError:
-        print("Error writing video file.")
-        return
-
-    with open(filename, "rb") as f:
-        tensor_string = f.read()
-
-    try:
-        os.remove(filename)
-    except OSError:
-        logger.warning("The temporary file used by moviepy cannot be deleted.")
-
+            if tensor.dtype != np.uint8:
+                if tensor.max() <= 1.0:
+                    tensor = (tensor * 255).astype(np.uint8)
+                else:
+                    tensor = tensor.astype(np.uint8)
+            
+            tensor_to_multitrack_mp4(
+                tensor=tensor,
+                output_path=output_path,
+                fps=fps,
+                crf=23,
+                pixel_format='yuv420p'
+            )
+            
+            with open(output_path, 'rb') as f:
+                tensor_string = f.read()
+                
+        finally:
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+    
+    b, t, h, w, c = tensor.shape
     return Summary.Image(
-        height=h, width=w, colorspace=c, encoded_image_string=tensor_string
+        height=h,
+        width=w,
+        colorspace=c,
+        encoded_image_string=tensor_string
     )
+
+def tensor_to_multitrack_mp4(
+    tensor: np.ndarray,
+    output_path: str,
+    fps: float = 30.0,
+    crf: int = 23,
+    pixel_format: str = 'yuv420p'
+) -> None:
+    try:
+        import ffmpeg
+    except ImportError:
+        print("add_video needs package ffmpeg-python")
+        return
+    import tempfile
+    if len(tensor.shape) != 5:
+        raise ValueError(f"Expected 5D tensor, got shape {tensor.shape}")
+    
+    batch_size, channels, time_steps, height, width = tensor.shape
+    
+    if channels not in [1, 3]:
+        raise ValueError(f"Expected 1 or 3 channels, got {channels}")
+    tensor = np.transpose(tensor, (0, 2, 3, 4, 1))
+    
+    if tensor.dtype != np.uint8:
+        if tensor.max() <= 1.0:
+            tensor = (tensor * 255).astype(np.uint8)
+        else:
+            tensor = tensor.astype(np.uint8)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_files = []
+        for batch_idx in range(batch_size):
+            temp_path = os.path.join(temp_dir, f'temp_{batch_idx}.mp4')
+            temp_files.append(temp_path)
+            
+            frames = tensor[batch_idx]
+            
+            if channels == 1:
+                frames = np.repeat(frames, 3, axis=-1)
+            
+            input_data = b''.join(frame.tobytes() for frame in frames)
+            
+            process = (
+                ffmpeg
+                .input('pipe:', format='rawvideo', pix_fmt='rgb24',
+                       s=f'{width}x{height}', r=fps)
+                .output(temp_path, pix_fmt=pixel_format, crf=crf,
+                       vcodec='libx264')
+                .overwrite_output()
+            )
+            
+            ffmpeg.run(process, input=input_data)
+        
+        maps = []
+        input_args = []
+        
+        for i, temp_file in enumerate(temp_files):
+            input_args.extend(['-i', temp_file])
+            maps.extend(['-map', f'{i}:v:0'])
+        
+        cmd = ['ffmpeg', *input_args, *maps, '-c:v', 'copy', '-y', output_path]
+        
+        import subprocess
+        subprocess.run(cmd, check=True)
 
 
 def audio(tag, tensor, sample_rate=44100):
