@@ -696,9 +696,7 @@ def make_video(tensor, fps):
     
     b, t, h, w, c = tensor.shape
     return Summary.Image(
-        height=h,
-        width=w,
-        colorspace=c,
+        height=b,
         encoded_image_string=tensor_string
     )
 
